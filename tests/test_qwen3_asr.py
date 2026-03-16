@@ -12,16 +12,16 @@ import mlx.core as mx
 import pytest
 
 from vllm_metal.stt.config import is_stt_model
-from vllm_metal.stt.qwen3_asr import (
-    AudioEncoder,
+from vllm_metal.stt.qwen3_asr.config import (
     Qwen3ASRAudioConfig,
     Qwen3ASRConfig,
-    Qwen3ASRModel,
     Qwen3ASRTextConfig,
+)
+from vllm_metal.stt.qwen3_asr.model import (
+    AudioEncoder,
+    Qwen3ASRModel,
     Qwen3Attention,
     Qwen3LM,
-    _get_cnn_output_lengths,
-    _get_feat_extract_output_lengths,
 )
 from vllm_metal.stt.transcribe import Qwen3ASRTranscriber, load_model
 
@@ -94,34 +94,36 @@ class TestQwen3ASRConfig:
 
 
 class TestCNNOutputLengths:
-    """Tests for _get_cnn_output_lengths and _get_feat_extract_output_lengths."""
+    """Tests for Qwen3ASRAudioConfig shape helpers."""
 
     def test_single_conv_stride(self) -> None:
         """3x Conv2d stride-2 on 100 frames → 13 output frames."""
-        assert _get_cnn_output_lengths(100) == 13
+        assert Qwen3ASRAudioConfig.cnn_output_length(100) == 13
 
     def test_small_inputs(self) -> None:
         """Edge cases for small input lengths."""
-        assert _get_cnn_output_lengths(1) == 1
-        assert _get_cnn_output_lengths(2) == 1
+        assert Qwen3ASRAudioConfig.cnn_output_length(1) == 1
+        assert Qwen3ASRAudioConfig.cnn_output_length(2) == 1
         # 3 -> 2 -> 1 -> 1 after 3x stride-2
-        assert _get_cnn_output_lengths(3) == 1
+        assert Qwen3ASRAudioConfig.cnn_output_length(3) == 1
 
     def test_feat_extract_full_chunks(self) -> None:
         """Full chunks of 100 frames each produce 13 frames per chunk."""
-        assert _get_feat_extract_output_lengths(100) == 13
-        assert _get_feat_extract_output_lengths(200) == 26
-        assert _get_feat_extract_output_lengths(300) == 39
+        cfg = Qwen3ASRAudioConfig()
+        assert cfg.feat_extract_output_length(100) == 13
+        assert cfg.feat_extract_output_length(200) == 26
+        assert cfg.feat_extract_output_length(300) == 39
 
     def test_feat_extract_with_remainder(self) -> None:
         """Partial chunk adds its CNN output to full chunks."""
         # 150 = 1 full chunk (13) + 50 remainder
-        remainder_out = _get_cnn_output_lengths(50)
-        assert _get_feat_extract_output_lengths(150) == 13 + remainder_out
+        cfg = Qwen3ASRAudioConfig()
+        remainder_out = Qwen3ASRAudioConfig.cnn_output_length(50)
+        assert cfg.feat_extract_output_length(150) == 13 + remainder_out
 
     def test_feat_extract_3000_frames(self) -> None:
         """30 seconds at 16kHz/hop160 = 3000 frames → 30 * 13 = 390."""
-        assert _get_feat_extract_output_lengths(3000) == 390
+        assert Qwen3ASRAudioConfig().feat_extract_output_length(3000) == 390
 
 
 # ===========================================================================
@@ -154,7 +156,7 @@ class TestAudioEncoderShapes:
         mel = mx.random.normal((16, 80))  # 80 < 100 frames
         out = tiny_encoder(mel)
         mx.eval(out)
-        expected_frames = _get_cnn_output_lengths(80)
+        expected_frames = Qwen3ASRAudioConfig.cnn_output_length(80)
         assert out.shape == (expected_frames, 48)
 
     def test_exact_chunk(self, tiny_encoder) -> None:
@@ -529,7 +531,6 @@ class TestBuildPromptTokens:
         )
         model = MagicMock()
         model.config = config
-        t = Qwen3ASRTranscriber(model, model_path=str(tmp_path))
 
         # Inject mock tokenizer with deterministic encode
         mock_tok = MagicMock()
@@ -543,7 +544,7 @@ class TestBuildPromptTokens:
         mock_tok.encode = MagicMock(
             side_effect=lambda s, add_special_tokens=False: _encode_map.get(s, [0])
         )
-        t._tokenizer = mock_tok
+        t = Qwen3ASRTranscriber(model, tokenizer=mock_tok)
         return t
 
     def test_audio_pad_count_matches_frames(self, transcriber) -> None:
@@ -635,7 +636,7 @@ class TestModelLoad:
         mel = mx.random.normal((128, 300))
         embeddings = model.encode(mel)
         mx.eval(embeddings)
-        expected = _get_feat_extract_output_lengths(300)
+        expected = model.config.audio_config.feat_extract_output_length(300)
         assert embeddings.shape == (expected, 1024)
 
     def test_greedy_decode(self) -> None:
